@@ -71,6 +71,7 @@ class YOLOProcessor:
         try:
             # Cihaz seçimi: sadece GPU
             if not torch.cuda.is_available():
+                device = 'cpu'
                 raise Exception("CUDA GPU bulunamadı. Lütfen uyumlu bir NVIDIA GPU ve uygun CUDA/PyTorch kurulumu sağlayın.")
             if device == 'auto':
                 device = 'cuda:0'
