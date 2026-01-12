@@ -4,8 +4,9 @@
   "last_image_index": {
     "normal": 9,
     "bbmod": 2426,
-    "unet": 0
+    "unet": 9
   },
   "epsilon": 0.0005,
-  "shrink": 3.0
+  "shrink": 3.0,
+  "auto_save_on_next": true
 }

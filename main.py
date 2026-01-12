@@ -43,6 +43,7 @@ class YOLOSegmentationEditor:
         self.mode_state = {}  # Mod'a özel state bilgisi
         self.epsilon_factor = 0.002  # Polygon basitleştirme faktörü (varsayılan)
         self.shrink_value = 0.0  # Shrink yüzdesi (varsayılan)
+        self.auto_save_on_next = False  # Sonraki görsele geçerken otomatik kaydet
         
         # Mod sınıfları
         self.output_base = "output"
@@ -144,6 +145,13 @@ class YOLOSegmentationEditor:
         shrink_factor = shrink_percent / 100.0
         self.image_editor.shrink_polygons(shrink_factor)
         print(f"[BİLGİ] Shrink uygulandı: {shrink_percent}%")
+    
+    def on_auto_save_change(self):
+        """Otomatik kaydet checkbox'ı değiştiğinde çağrılır"""
+        self.auto_save_on_next = self.auto_save_var.get()
+        status = "açık" if self.auto_save_on_next else "kapalı"
+        print(f"[BİLGİ] Otomatik kaydet: {status}")
+        self.save_config()
     
     def create_widgets(self):
         """GUI widget'larını oluşturur"""
@@ -377,6 +385,17 @@ class YOLOSegmentationEditor:
             fg="white"
         ).pack(side=tk.LEFT, padx=5)
         
+        # Otomatik kaydet checkbox'ı
+        self.auto_save_var = tk.BooleanVar(value=self.auto_save_on_next)
+        self.auto_save_checkbox = tk.Checkbutton(
+            bottom_frame,
+            text="Oto Kaydet",
+            variable=self.auto_save_var,
+            command=self.on_auto_save_change,
+            font=("Arial", 9)
+        )
+        self.auto_save_checkbox.pack(side=tk.LEFT, padx=5)
+        
         # Durum etiketi
         self.status_label = tk.Label(
             bottom_frame,
@@ -435,16 +454,23 @@ class YOLOSegmentationEditor:
             if hasattr(self, 'shrink_var'):
                 self.shrink_var.set(self.shrink_value)
                 self.shrink_label.config(text=f"{int(self.shrink_value)}%")
+        # Otomatik kaydet ayarını yükle
+        if 'auto_save_on_next' in config:
+            self.auto_save_on_next = config['auto_save_on_next']
+            if hasattr(self, 'auto_save_var'):
+                self.auto_save_var.set(self.auto_save_on_next)
     
     def save_config(self):
         """Mevcut seçimleri config dosyasına kaydeder"""
         shrink_value = self.shrink_var.get() if hasattr(self, 'shrink_var') else 0.0
+        auto_save = self.auto_save_var.get() if hasattr(self, 'auto_save_var') else self.auto_save_on_next
         save_config_util(
             folder=self.selected_folder,
             model=self.selected_model,
             last_image_index=self.last_image_indices,
             epsilon=self.epsilon_factor,
             shrink=shrink_value,
+            auto_save_on_next=auto_save,
             config_path=self.config_path
         )
     
@@ -870,6 +896,35 @@ class YOLOSegmentationEditor:
             traceback.print_exc()
             messagebox.showerror("Hata", error_msg)
     
+    def save_to_all_modes_silent(self):
+        """Mevcut düzenlemeyi tüm modlara sessizce kaydeder (mesaj göstermez)"""
+        if not self.current_image_path:
+            return
+        
+        try:
+            # Önce mevcut mod'a kaydet (mesaj gösterme)
+            current_success = self.save_current(show_message=False)
+            if not current_success:
+                return
+            
+            # Şimdi diğer modlara da kaydet
+            if self.mode == 'normal':
+                self.save_to_unet()
+            elif self.mode == 'unet':
+                self.save_to_normal()
+            
+            # Tüm modlar için aynı görsel indeksini kaydet
+            if self.current_image_index >= 0:
+                self.last_image_indices['normal'] = self.current_image_index
+                self.last_image_indices['unet'] = self.current_image_index
+                self.save_config()
+            
+            print(f"[BAŞARILI] Otomatik kaydedildi: {os.path.basename(self.current_image_path)}")
+            
+        except Exception as e:
+            print(f"[HATA] Otomatik kaydetme hatası: {str(e)}", file=sys.stderr)
+            traceback.print_exc()
+    
     def save_to_normal(self):
         """UNet'te düzenlenen noktaları Normal mod'a kaydeder"""
         from utils.image_utils import adjust_polygons_from_crop
@@ -1119,6 +1174,13 @@ class YOLOSegmentationEditor:
     def next_image(self):
         """Sonraki görsele geçer"""
         if self.current_image_index < len(self.image_files) - 1:
+            # Otomatik kaydet seçiliyse önce tümüne kaydet
+            if self.auto_save_on_next and self.current_image_path:
+                edited_data = self.image_editor.get_edited_points() if self.image_editor else None
+                if edited_data:
+                    print("[BİLGİ] Otomatik kaydet aktif - tümüne kaydediliyor...")
+                    self.save_to_all_modes_silent()
+            
             self.current_image_index += 1
             self.load_current_image()
         else:
