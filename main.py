@@ -18,7 +18,7 @@ import random
 from yolo_processor import YOLOProcessor
 from image_editor import ImageEditor
 from viewer import open_viewer
-from mods import NormalMode, BBModMode, UNetMode
+from mods import NormalMode, UNetMode
 from utils import load_config as load_config_util, save_config as save_config_util, ensure_output_structure
 
 
@@ -39,20 +39,23 @@ class YOLOSegmentationEditor:
         self.current_image_index = -1
         self.current_image_path = None
         self.current_masks_data = []
-        self.mode = 'normal'  # 'normal', 'bbmod' veya 'unet'
+        self.mode = 'normal'  # 'normal' veya 'unet'
         self.mode_state = {}  # Mod'a özel state bilgisi
         self.epsilon_factor = 0.002  # Polygon basitleştirme faktörü (varsayılan)
+        self.shrink_value = 0.0  # Shrink yüzdesi (varsayılan)
         
         # Mod sınıfları
         self.output_base = "output"
         self.mode_handlers = {
             'normal': NormalMode(self.output_base),
-            'bbmod': BBModMode(self.output_base),
             'unet': UNetMode(self.output_base)
         }
         
         # Config dosyası yolu
         self.config_path = "config.json"
+        
+        # Son görsel indeksleri (mod'a göre)
+        self.last_image_indices = {}
         
         # Config'den değerleri yükle
         self.load_config()
@@ -67,6 +70,11 @@ class YOLOSegmentationEditor:
         """Mod değiştiğinde çağrılır"""
         new_mode = self.mode_var.get()
         if new_mode != self.mode:
+            # Eski mod'un son görsel indeksini kaydet
+            if self.current_image_index >= 0:
+                self.last_image_indices[self.mode] = self.current_image_index
+                self.save_config()
+            
             self.mode = new_mode
             print(f"[BİLGİ] Mod değiştirildi: {self.mode}")
             # Mevcut düzenlemeleri sıfırla
@@ -74,14 +82,22 @@ class YOLOSegmentationEditor:
             self.mode_state = {}
             if self.image_editor:
                 self.canvas.delete("all")
+            
+            # Yeni mod'un son görseline geç (eğer görseller yüklüyse)
+            if self.image_files:
+                saved_index = self.last_image_indices.get(self.mode, 0)
+                if saved_index >= 0 and saved_index < len(self.image_files):
+                    self.current_image_index = saved_index
+                    self.load_current_image()
     
     def on_epsilon_change(self, event=None):
         """Epsilon değeri değiştiğinde çağrılır"""
         try:
             new_epsilon = self.epsilon_var.get()
-            if 0.001 <= new_epsilon <= 0.1:
+            if 0.0001 <= new_epsilon <= 0.1:
                 self.epsilon_factor = new_epsilon
-                print(f"[BİLGİ] Epsilon faktörü güncellendi: {self.epsilon_factor:.3f}")
+                print(f"[BİLGİ] Epsilon faktörü güncellendi: {self.epsilon_factor:.4f}")
+                self.save_config()  # Config'e kaydet
             else:
                 # Geçersiz değer, eski değere geri dön
                 self.epsilon_var.set(self.epsilon_factor)
@@ -89,19 +105,45 @@ class YOLOSegmentationEditor:
             # Hata durumunda eski değere geri dön
             self.epsilon_var.set(self.epsilon_factor)
     
-    def on_epsilon_change(self, event=None):
-        """Epsilon değeri değiştiğinde çağrılır"""
+    def on_shrink_change(self, value=None):
+        """Noktaları içe doğru hareket ettirme slider'ı değiştiğinde çağrılır"""
+        if not self.image_editor:
+            return
+        
         try:
-            new_epsilon = self.epsilon_var.get()
-            if 0.001 <= new_epsilon <= 0.1:
-                self.epsilon_factor = new_epsilon
-                print(f"[BİLGİ] Epsilon faktörü güncellendi: {self.epsilon_factor:.3f}")
-            else:
-                # Geçersiz değer, eski değere geri dön
-                self.epsilon_var.set(self.epsilon_factor)
-        except:
-            # Hata durumunda eski değere geri dön
-            self.epsilon_var.set(self.epsilon_factor)
+            # Slider değeri 0-100 arası, bunu 0.0-1.0 arasına çevir
+            shrink_percent = self.shrink_var.get()
+            shrink_factor = shrink_percent / 100.0
+            
+            # Label'ı güncelle
+            self.shrink_label.config(text=f"{int(shrink_percent)}%")
+            
+            # Noktaları içe doğru hareket ettir
+            self.image_editor.shrink_polygons(shrink_factor)
+            
+            # Config'e kaydet
+            self.save_config()
+            
+        except Exception as e:
+            print(f"[HATA] İçe çekme hatası: {str(e)}", file=sys.stderr)
+    
+    def apply_shrink(self, event=None):
+        """Mevcut shrink değerini polygon'lara uygular (E tuşu)"""
+        if not self.image_editor:
+            return
+        
+        shrink_percent = self.shrink_var.get()
+        if shrink_percent <= 0:
+            print("[BİLGİ] Shrink değeri 0, uygulanacak bir şey yok")
+            return
+        
+        # Önce base noktalarına dön (0'a çek)
+        self.image_editor.shrink_polygons(0.0)
+        
+        # Sonra shrink uygula
+        shrink_factor = shrink_percent / 100.0
+        self.image_editor.shrink_polygons(shrink_factor)
+        print(f"[BİLGİ] Shrink uygulandı: {shrink_percent}%")
     
     def create_widgets(self):
         """GUI widget'larını oluşturur"""
@@ -119,7 +161,7 @@ class YOLOSegmentationEditor:
         mode_dropdown = ttk.Combobox(
             mode_frame,
             textvariable=self.mode_var,
-            values=["normal", "bbmod", "unet"],
+            values=["normal", "unet"],
             state="readonly",
             width=10
         )
@@ -170,17 +212,39 @@ class YOLOSegmentationEditor:
         self.epsilon_var = tk.DoubleVar(value=0.002)
         epsilon_spinbox = tk.Spinbox(
             epsilon_frame,
-            from_=0.001,
+            from_=0.0001,
             to=0.1,
-            increment=0.001,
+            increment=0.0001,
             textvariable=self.epsilon_var,
             width=8,
-            format="%.3f",
+            format="%.4f",
             command=self.on_epsilon_change
         )
         epsilon_spinbox.pack(side=tk.LEFT, padx=2)
         epsilon_spinbox.bind("<Return>", self.on_epsilon_change)
         epsilon_spinbox.bind("<FocusOut>", self.on_epsilon_change)
+        
+        # Noktaları içe doğru hareket ettirme slider'ı
+        shrink_frame = tk.Frame(top_frame)
+        shrink_frame.pack(side=tk.LEFT, padx=5)
+        
+        tk.Label(shrink_frame, text="İçe Çek:", font=("Arial", 9)).pack(side=tk.LEFT, padx=2)
+        self.shrink_var = tk.DoubleVar(value=self.shrink_value)
+        shrink_scale = tk.Scale(
+            shrink_frame,
+            from_=0.0,
+            to=30.0,  # Maksimum %30 (daha etkili değerler için)
+            orient=tk.HORIZONTAL,
+            variable=self.shrink_var,
+            length=150,
+            resolution=1.0,
+            command=self.on_shrink_change
+        )
+        shrink_scale.pack(side=tk.LEFT, padx=2)
+        
+        # Değer gösterimi için label
+        self.shrink_label = tk.Label(shrink_frame, text=f"{int(self.shrink_value)}%", font=("Arial", 9), width=4)
+        self.shrink_label.pack(side=tk.LEFT, padx=2)
         
         # Klasör ve model bilgisi
         self.info_label = tk.Label(
@@ -217,8 +281,11 @@ class YOLOSegmentationEditor:
         self.canvas.bind('<KeyPress-minus>', lambda e: self.delete_point())  # - tuşu
         self.canvas.bind('<KeyPress-s>', lambda e: self.save_to_all_modes())  # Tümüne Kaydet
         self.canvas.bind('<KeyPress-S>', lambda e: self.save_to_all_modes())  # Tümüne Kaydet (büyük harf)
+        self.canvas.bind('<KeyPress-e>', lambda e: self.apply_shrink())  # Shrink uygula
+        self.canvas.bind('<KeyPress-E>', lambda e: self.apply_shrink())  # Shrink uygula (büyük harf)
         self.canvas.bind('<Right>', lambda e: self.next_image())  # Sonraki görsel
         self.canvas.bind('<Left>', lambda e: self.prev_image())  # Önceki görsel
+        self.canvas.bind('<Button-3>', lambda e: self.next_image())  # Sağ tık - sonraki görsel
         
         # Alt frame - Kontrol butonları
         bottom_frame = tk.Frame(self.root)
@@ -290,6 +357,26 @@ class YOLOSegmentationEditor:
             height=2
         ).pack(side=tk.LEFT, padx=5)
         
+        tk.Button(
+            bottom_frame,
+            text="Görseli Sil",
+            command=self.delete_current_image,
+            width=15,
+            height=2,
+            bg="#D32F2F",
+            fg="white"
+        ).pack(side=tk.LEFT, padx=5)
+        
+        tk.Button(
+            bottom_frame,
+            text="Son Görsele Git",
+            command=self.go_to_last_image,
+            width=18,
+            height=2,
+            bg="#FF5722",
+            fg="white"
+        ).pack(side=tk.LEFT, padx=5)
+        
         # Durum etiketi
         self.status_label = tk.Label(
             bottom_frame,
@@ -298,10 +385,19 @@ class YOLOSegmentationEditor:
         )
         self.status_label.pack(side=tk.LEFT, padx=20)
         
+        # Görsel işlendi bilgisi
+        self.processed_label = tk.Label(
+            bottom_frame,
+            text="",
+            font=("Arial", 9),
+            fg="green"
+        )
+        self.processed_label.pack(side=tk.LEFT, padx=10)
+        
         # Klavye kısayolları bilgisi
         help_label = tk.Label(
             bottom_frame,
-            text="Kısayollar: A=Ekle, D=Sil, S=Tümüne Kaydet, →=Sonraki, ←=Önceki",
+            text="Kısayollar: A=Ekle, D=Sil, S=Tümüne Kaydet, E=Shrink Uygula, →/SağTık=Sonraki, ←=Önceki",
             font=("Arial", 8),
             fg="gray"
         )
@@ -325,14 +421,38 @@ class YOLOSegmentationEditor:
             except Exception as e:
                 print(f"[UYARI] Config'den model yüklenemedi: {str(e)}")
                 self.selected_model = None
+        # Son görsel indekslerini yükle
+        if config.get('last_image_index'):
+            self.last_image_indices = config['last_image_index']
+        # Epsilon değerini yükle
+        if 'epsilon' in config:
+            self.epsilon_factor = config['epsilon']
+            if hasattr(self, 'epsilon_var'):
+                self.epsilon_var.set(self.epsilon_factor)
+        # Shrink değerini yükle
+        if 'shrink' in config:
+            self.shrink_value = config['shrink']
+            if hasattr(self, 'shrink_var'):
+                self.shrink_var.set(self.shrink_value)
+                self.shrink_label.config(text=f"{int(self.shrink_value)}%")
     
     def save_config(self):
         """Mevcut seçimleri config dosyasına kaydeder"""
+        shrink_value = self.shrink_var.get() if hasattr(self, 'shrink_var') else 0.0
         save_config_util(
             folder=self.selected_folder,
             model=self.selected_model,
+            last_image_index=self.last_image_indices,
+            epsilon=self.epsilon_factor,
+            shrink=shrink_value,
             config_path=self.config_path
         )
+    
+    def save_last_image_index(self):
+        """Mevcut görsel indeksini mod'a göre config'e kaydeder"""
+        if self.current_image_index >= 0 and self.mode:
+            self.last_image_indices[self.mode] = self.current_image_index
+            self.save_config()
     
     def select_folder(self):
         """Görsellerin bulunduğu klasörü seçer"""
@@ -405,9 +525,80 @@ class YOLOSegmentationEditor:
         # Canvas'a tekrar focus ver (klavye kısayolları için)
         self.canvas.focus_set()
         
-        # İlk görseli yükle
-        self.current_image_index = 0
+        # İlk görseli yükle - config'den son görsel indeksini kontrol et
+        saved_index = self.last_image_indices.get(self.mode, 0)
+        if saved_index >= 0 and saved_index < len(self.image_files):
+            self.current_image_index = saved_index
+        else:
+            self.current_image_index = 0
         self.load_current_image()
+    
+    def check_saved_data(self, image_path: str, mode: str) -> tuple:
+        """
+        Output klasöründe kaydedilmiş veri var mı kontrol eder.
+        
+        Returns:
+            (has_saved_data, saved_masks_data, display_path, state) tuple
+        """
+        image_filename = os.path.basename(image_path)
+        image_name = os.path.splitext(image_filename)[0]
+        
+        if mode == 'normal':
+            label_path = os.path.join(self.output_base, "normal", "labels", "train", f"{image_name}.txt")
+            image_path_saved = os.path.join(self.output_base, "normal", "images", "train", image_filename)
+        elif mode == 'unet':
+            mask_path = os.path.join(self.output_base, "unet", "masks", "train", f"{image_name}.png")
+            image_path_saved = os.path.join(self.output_base, "unet", "images", "train", image_filename)
+            # UNet için mask dosyası varsa kaydedilmiş demektir
+            if os.path.exists(mask_path) and os.path.exists(image_path_saved):
+                return (True, None, image_path_saved, {})  # UNet için mask'ı sonra yükleyeceğiz
+            return (False, None, None, None)
+        else:
+            return (False, None, None, None)
+        
+        # Normal için label dosyası kontrolü
+        if os.path.exists(label_path) and os.path.exists(image_path_saved):
+            # Label dosyasını oku ve polygon verilerine çevir
+            try:
+                img = Image.open(image_path_saved)
+                img_width, img_height = img.size
+                
+                masks_data = []
+                with open(label_path, 'r') as f:
+                    for line in f:
+                        line = line.strip()
+                        if not line:
+                            continue
+                        
+                        parts = line.split()
+                        if len(parts) < 7:  # class_id + en az 3 nokta (6 koordinat)
+                            continue
+                        
+                        class_id = int(parts[0])
+                        coords = [float(x) for x in parts[1:]]
+                        
+                        # Normalize koordinatları piksel koordinatlarına çevir
+                        polygon = []
+                        for i in range(0, len(coords), 2):
+                            if i + 1 < len(coords):
+                                x_norm = coords[i]
+                                y_norm = coords[i + 1]
+                                x_pixel = x_norm * img_width
+                                y_pixel = y_norm * img_height
+                                polygon.append((x_pixel, y_pixel))
+                        
+                        if len(polygon) >= 3:
+                            masks_data.append({
+                                'polygon': polygon,
+                                'class_id': class_id
+                            })
+                
+                if masks_data:
+                    return (True, masks_data, image_path_saved, {})
+            except Exception as e:
+                print(f"[UYARI] Kaydedilmiş veri okunurken hata: {str(e)}")
+        
+        return (False, None, None, None)
     
     def load_current_image(self):
         """Mevcut görseli yükler ve işler"""
@@ -416,48 +607,150 @@ class YOLOSegmentationEditor:
         
         self.current_image_path = self.image_files[self.current_image_index]
         
+        # İşlendi bilgisini temizle
+        self.processed_label.config(text="")
+        
         try:
-            # YOLOv8 ile işle
-            result = self.yolo_processor.process_image(self.current_image_path, epsilon_factor=self.epsilon_factor)
-            masks_data = result['masks']
-            bounding_boxes = result['boxes']
-            
-            # Mod handler'ı kullan
-            mode_handler = self.mode_handlers.get(self.mode)
-            if not mode_handler:
-                mode_handler = self.mode_handlers['normal']
-            
-            temp_dir = os.path.join(self.output_base, "temp")
-            display_path, adjusted_masks, state = mode_handler.load_image(
-                self.current_image_path,
-                masks_data,
-                bounding_boxes,
-                temp_dir
+            # Önce output klasöründe kaydedilmiş veri var mı kontrol et
+            has_saved, saved_masks, saved_image_path, saved_state = self.check_saved_data(
+                self.current_image_path, self.mode
             )
             
-            # Fallback kontrolü
-            if state.get('fallback'):
-                self.mode_var.set("normal")
-                self.mode = 'normal'
-                mode_handler = self.mode_handlers['normal']
+            if has_saved and saved_masks is not None:
+                # Kaydedilmiş verileri yükle (modele sokma)
+                print(f"[BİLGİ] Kaydedilmiş veriler yüklendi: {os.path.basename(self.current_image_path)}")
+                
+                # Mod handler'ı kullan (sadece görseli yüklemek için)
+                mode_handler = self.mode_handlers.get(self.mode)
+                if not mode_handler:
+                    mode_handler = self.mode_handlers['normal']
+                
+                # Görseli yükle (masks_data boş olarak, çünkü kaydedilmiş verileri kullanacağız)
+                temp_dir = os.path.join(self.output_base, "temp")
+                display_path, _, state = mode_handler.load_image(
+                    saved_image_path,
+                    [],  # Boş masks_data - kaydedilmiş verileri kullanacağız
+                    [],  # Boş bounding_boxes
+                    temp_dir
+                )
+                
+                # Kaydedilmiş mask verilerini kullan
+                self.current_masks_data = saved_masks
+                self.mode_state = saved_state
+                
+                # Canvas'a göster
+                self.image_editor.display_image(display_path, self.current_masks_data)
+                
+                # İşlendi bilgisini göster
+                self.processed_label.config(text="✓ Bu görsel işlendi", fg="green")
+                
+            elif has_saved and self.mode == 'unet':
+                # UNet için mask dosyası var, mask'ı yükle
+                image_filename = os.path.basename(self.current_image_path)
+                image_name = os.path.splitext(image_filename)[0]
+                mask_path = os.path.join(self.output_base, "unet", "masks", "train", f"{image_name}.png")
+                
+                # Mask dosyasından polygon'ları oluştur
+                print(f"[BİLGİ] Kaydedilmiş UNet mask yüklendi: {os.path.basename(self.current_image_path)}")
+                
+                try:
+                    import cv2
+                    import numpy as np
+                    
+                    # Mask dosyasını oku
+                    mask_img = Image.open(mask_path)
+                    mask_array = np.array(mask_img)
+                    
+                    # Binary mask'dan contour çıkar
+                    contours, _ = cv2.findContours(
+                        (mask_array == 255).astype(np.uint8),
+                        cv2.RETR_EXTERNAL,
+                        cv2.CHAIN_APPROX_SIMPLE
+                    )
+                    
+                    # Contour'lardan polygon'ları oluştur
+                    masks_data = []
+                    for contour in contours:
+                        if len(contour) >= 3:
+                            # Contour'u polygon'a çevir
+                            polygon = [(float(pt[0][0]), float(pt[0][1])) for pt in contour]
+                            masks_data.append({
+                                'polygon': polygon,
+                                'class_id': 0
+                            })
+                    
+                    # UNet için kaydedilmiş görsel zaten letterbox'a çevrilmiş (320x320)
+                    # Mask'tan çıkarılan polygon'lar da 320x320 koordinatlarında
+                    # Doğrudan kullanabiliriz, mode handler'a göndermeye gerek yok
+                    self.current_masks_data = masks_data
+                    self.mode_state = {}  # UNet için state gerekmez, görsel zaten hazır
+                    
+                    # Canvas'a göster (kaydedilmiş görseli doğrudan kullan)
+                    self.image_editor.display_image(saved_image_path, self.current_masks_data)
+                    
+                except Exception as e:
+                    print(f"[UYARI] UNet mask okunurken hata: {str(e)}")
+                    # Hata durumunda sadece görseli göster
+                    self.image_editor.display_image(saved_image_path, [])
+                    self.current_masks_data = []
+                    self.mode_state = {}
+                
+                # İşlendi bilgisini göster
+                self.processed_label.config(text="✓ Bu görsel işlendi", fg="green")
+                
+            else:
+                # Kaydedilmiş veri yok, modele sok
+                if not self.yolo_processor:
+                    messagebox.showwarning("Uyarı", "Model yüklenmemiş!")
+                    return
+                
+                # YOLOv8 ile işle
+                result = self.yolo_processor.process_image(self.current_image_path, epsilon_factor=self.epsilon_factor)
+                masks_data = result['masks']
+                bounding_boxes = result['boxes']
+                
+                # Mod handler'ı kullan
+                mode_handler = self.mode_handlers.get(self.mode)
+                if not mode_handler:
+                    mode_handler = self.mode_handlers['normal']
+                
+                temp_dir = os.path.join(self.output_base, "temp")
                 display_path, adjusted_masks, state = mode_handler.load_image(
                     self.current_image_path,
                     masks_data,
                     bounding_boxes,
                     temp_dir
                 )
-            
-            self.current_masks_data = adjusted_masks
-            self.mode_state = state
-            
-            # Canvas'a göster
-            self.image_editor.display_image(display_path, self.current_masks_data)
+                
+                # Fallback kontrolü
+                if state.get('fallback'):
+                    self.mode_var.set("normal")
+                    self.mode = 'normal'
+                    mode_handler = self.mode_handlers['normal']
+                    display_path, adjusted_masks, state = mode_handler.load_image(
+                        self.current_image_path,
+                        masks_data,
+                        bounding_boxes,
+                        temp_dir
+                    )
+                
+                self.current_masks_data = adjusted_masks
+                self.mode_state = state
+                
+                # Canvas'a göster
+                self.image_editor.display_image(display_path, self.current_masks_data)
             
             # Canvas'a focus ver (klavye kısayolları için)
             self.canvas.focus_set()
             
+            # Polygon'ları çiz
+            self.image_editor.draw_polygons()
+            
             # Durum güncelle
             self.update_status()
+            
+            # Son görsel indeksini kaydet
+            self.save_last_image_index()
             
         except Exception as e:
             error_msg = f"Görsel işlenirken hata: {str(e)}"
@@ -538,7 +831,7 @@ class YOLOSegmentationEditor:
             return False
     
     def save_to_all_modes(self):
-        """Mevcut düzenlemeyi tüm modlara (normal, bbmod, unet) kaydeder"""
+        """Mevcut düzenlemeyi tüm modlara (normal, unet) kaydeder"""
         if not self.current_image_path:
             warning_msg = "Kaydedilecek görsel yok!"
             print(f"[UYARI] {warning_msg}")
@@ -554,17 +847,17 @@ class YOLOSegmentationEditor:
             # Şimdi diğer modlara da kaydet
             other_modes_success = True
             if self.mode == 'normal':
-                # Normal modda düzenlenmiş, BBMod ve UNet'e de kaydet
-                self.save_to_bbmod()
-                self.save_to_unet()
-            elif self.mode == 'bbmod':
-                # BBMod'da düzenlenmiş, Normal ve UNet'e de kaydet
-                self.save_to_normal()
+                # Normal modda düzenlenmiş, UNet'e de kaydet
                 self.save_to_unet()
             elif self.mode == 'unet':
-                # UNet'te düzenlenmiş, Normal ve BBMod'a da kaydet
+                # UNet'te düzenlenmiş, Normal'e de kaydet
                 self.save_to_normal()
-                self.save_to_bbmod()
+            
+            # Tüm modlar için aynı görsel indeksini kaydet
+            if self.current_image_index >= 0:
+                self.last_image_indices['normal'] = self.current_image_index
+                self.last_image_indices['unet'] = self.current_image_index
+                self.save_config()
             
             # Sadece bir kere başarılı mesajı göster
             success_msg = f"Görsel ve etiketler tüm modlara kaydedildi!"
@@ -577,117 +870,8 @@ class YOLOSegmentationEditor:
             traceback.print_exc()
             messagebox.showerror("Hata", error_msg)
     
-    def save_to_bbmod(self):
-        """Normal veya UNet modunda düzenlenen noktaları BBMod'a kaydeder"""
-        from utils.image_utils import crop_image_by_bbox, adjust_polygons_to_crop
-        
-        try:
-            # Düzenlenmiş noktaları al
-            edited_data = self.image_editor.get_edited_points()
-            
-            if not edited_data:
-                return
-            
-            # Mod'a göre dönüşüm yap
-            if self.mode == 'unet':
-                # UNet'ten: letterbox koordinatlarından kırpılmış görsel koordinatlarına
-                letterbox_offset = self.mode_state.get('letterbox_offset')
-                letterbox_scale = self.mode_state.get('letterbox_scale')
-                
-                if not letterbox_offset or not letterbox_scale:
-                    print("[UYARI] UNet'ten BBMod'a kaydetmek için gerekli bilgiler eksik")
-                    return
-                
-                # Letterbox koordinatlarından kırpılmış görsel koordinatlarına çevir
-                offset_x, offset_y = letterbox_offset
-                edited_data = []
-                for mask_data in self.image_editor.get_edited_points():
-                    polygon = mask_data['polygon']
-                    # Letterbox offset'ini çıkar, scale'i geri al
-                    adjusted_polygon = [((x - offset_x) / letterbox_scale, (y - offset_y) / letterbox_scale) 
-                                       for x, y in polygon]
-                    edited_data.append({
-                        'polygon': adjusted_polygon,
-                        'class_id': mask_data.get('class_id', 0)
-                    })
-            
-            # YOLO'dan bounding box'ları al (UNet'ten geliyorsa zaten crop_box var, ama yine de kontrol edelim)
-            if self.mode == 'normal':
-                result = self.yolo_processor.process_image(self.current_image_path, epsilon_factor=self.epsilon_factor)
-                bounding_boxes = result['boxes']
-                
-                if len(bounding_boxes) == 0:
-                    print("[UYARI] BBMod'a kaydetmek için bounding box bulunamadı")
-                    return
-                
-                # En büyük bounding box'ı kullan
-                largest_box = max(bounding_boxes, key=lambda b: (b[2] - b[0]) * (b[3] - b[1]))
-                cropped_image, crop_box = crop_image_by_bbox(self.current_image_path, largest_box)
-                
-                # Polygon koordinatlarını kırpılmış görsele göre ayarla
-                adjusted_data = adjust_polygons_to_crop(edited_data, crop_box)
-            else:
-                # UNet'ten geliyorsa, zaten kırpılmış görsel koordinatlarında
-                crop_box = self.mode_state.get('crop_box')
-                if not crop_box:
-                    print("[UYARI] BBMod'a kaydetmek için crop_box bilgisi yok")
-                    return
-                
-                # Görseli yeniden kırp (kaydetmek için)
-                from PIL import Image
-                img = Image.open(self.current_image_path)
-                cropped_image = img.crop(crop_box)
-                adjusted_data = edited_data
-            
-            if not adjusted_data:
-                print("[UYARI] BBMod'a kaydedilecek geçerli polygon yok")
-                return
-            
-            # BBMod klasörlerine kaydet
-            output_images_dir = os.path.join(self.output_base, "bbmod", "images", "train")
-            output_labels_dir = os.path.join(self.output_base, "bbmod", "labels", "train")
-            
-            image_filename = os.path.basename(self.current_image_path)
-            image_name = os.path.splitext(image_filename)[0]
-            
-            # Kırpılmış görseli kaydet
-            output_image_path = os.path.join(output_images_dir, image_filename)
-            cropped_image.save(output_image_path)
-            
-            # Kırpılmış görsel boyutlarını al
-            img_width, img_height = cropped_image.size
-            
-            # Etiket dosyasını oluştur
-            output_label_path = os.path.join(output_labels_dir, f"{image_name}.txt")
-            
-            with open(output_label_path, 'w') as f:
-                for mask_data in adjusted_data:
-                    polygon = mask_data['polygon']
-                    class_id = mask_data.get('class_id', 0)
-                    
-                    if len(polygon) < 3:
-                        continue
-                    
-                    # Normalize koordinatları hesapla (kırpılmış görsele göre)
-                    normalized_coords = []
-                    for x, y in polygon:
-                        norm_x = x / img_width
-                        norm_y = y / img_height
-                        norm_x = max(0.0, min(1.0, norm_x))
-                        norm_y = max(0.0, min(1.0, norm_y))
-                        normalized_coords.extend([norm_x, norm_y])
-                    
-                    line = f"{class_id} " + " ".join([f"{coord:.6f}" for coord in normalized_coords])
-                    f.write(line + "\n")
-            
-            print(f"[BAŞARILI] BBMod'a kaydedildi: {output_image_path}")
-            
-        except Exception as e:
-            print(f"[HATA] BBMod'a kaydetme hatası: {str(e)}", file=sys.stderr)
-            traceback.print_exc()
-    
     def save_to_normal(self):
-        """BBMod veya UNet'te düzenlenen noktaları Normal mod'a kaydeder"""
+        """UNet'te düzenlenen noktaları Normal mod'a kaydeder"""
         from utils.image_utils import adjust_polygons_from_crop
         
         try:
@@ -723,15 +907,6 @@ class YOLOSegmentationEditor:
                 
                 # Kırpılmış görsel koordinatlarından orijinal görsel koordinatlarına çevir
                 adjusted_data = adjust_polygons_from_crop(adjusted_masks_crop, crop_box)
-                
-            elif self.mode == 'bbmod':
-                # BBMod'dan: kırpılmış görsel koordinatlarından orijinal görsel koordinatlarına
-                crop_box = self.mode_state.get('crop_box')
-                if not crop_box:
-                    print("[UYARI] Normal'e kaydetmek için crop_box bilgisi yok")
-                    return
-                
-                adjusted_data = adjust_polygons_from_crop(edited_data, crop_box)
             else:
                 # Normal moddan: zaten orijinal görsel koordinatlarında
                 adjusted_data = edited_data
@@ -743,6 +918,10 @@ class YOLOSegmentationEditor:
             # Normal klasörlerine kaydet
             output_images_dir = os.path.join(self.output_base, "normal", "images", "train")
             output_labels_dir = os.path.join(self.output_base, "normal", "labels", "train")
+            
+            # Klasörleri oluştur
+            os.makedirs(output_images_dir, exist_ok=True)
+            os.makedirs(output_labels_dir, exist_ok=True)
             
             image_filename = os.path.basename(self.current_image_path)
             image_name = os.path.splitext(image_filename)[0]
@@ -785,7 +964,7 @@ class YOLOSegmentationEditor:
             traceback.print_exc()
     
     def save_to_unet(self):
-        """Normal veya BBMod'da düzenlenen noktaları UNet formatına kaydeder"""
+        """Normal'da düzenlenen noktaları UNet formatına kaydeder"""
         from utils.image_utils import (
             crop_image_by_bbox,
             adjust_polygons_to_crop,
@@ -817,9 +996,6 @@ class YOLOSegmentationEditor:
             if self.mode == 'normal':
                 # Normal moddan geliyorsa, önce kırpılmış görsele göre ayarla
                 adjusted_masks_crop = adjust_polygons_to_crop(edited_data, crop_box)
-            elif self.mode == 'bbmod':
-                # BBMod'dan geliyorsa, zaten kırpılmış görsele göre
-                adjusted_masks_crop = edited_data
             else:
                 # UNet'ten geliyorsa, letterbox koordinatlarından kırpılmış görsele çevir
                 letterbox_offset = self.mode_state.get('letterbox_offset')
@@ -842,8 +1018,9 @@ class YOLOSegmentationEditor:
                         'confidence': mask_data.get('confidence', 0.0)
                     })
             
-            # 320x320'e letterbox resize
-            letterbox_img, offset_x, offset_y, scale, new_width, new_height = letterbox_resize(cropped_image, (320, 320))
+            # 576x320'e letterbox resize (aspect ratio korunarak)
+            target_size = (576, 320)
+            letterbox_img, offset_x, offset_y, scale, new_width, new_height = letterbox_resize(cropped_image, target_size)
             
             # Polygon koordinatlarını letterbox resize'e göre ayarla
             adjusted_masks = []
@@ -871,18 +1048,18 @@ class YOLOSegmentationEditor:
             image_filename = os.path.basename(self.current_image_path)
             image_name = os.path.splitext(image_filename)[0]
             
-            # 320x320 letterbox görseli kaydet
+            # 576x320 letterbox görseli kaydet
             output_image_path = os.path.join(output_images_dir, image_filename)
             letterbox_img.save(output_image_path)
             
             # Binary mask (object mask) oluştur ve kaydet (dosya adı aynı, sadece uzantı .png)
-            binary_mask = create_binary_mask(adjusted_masks, 320, 320)
+            binary_mask = create_binary_mask(adjusted_masks, target_size[0], target_size[1])
             mask_filename = f"{image_name}.png"
             output_mask_path = os.path.join(output_masks_dir, mask_filename)
             binary_mask.save(output_mask_path)
             
-            # Valid mask oluştur ve kaydet (valid klasörüne, dosya adı aynı, sadece uzantı .png)
-            valid_mask = create_valid_mask((320, 320), offset_x, offset_y, new_width, new_height)
+            # Valid mask oluştur ve kaydet - tamamen beyaz (576x320)
+            valid_mask = Image.new('L', target_size, 255)  # Tamamen beyaz
             valid_filename = f"{image_name}.png"
             output_valid_path = os.path.join(output_valid_dir, valid_filename)
             valid_mask.save(output_valid_path)
@@ -949,6 +1126,117 @@ class YOLOSegmentationEditor:
             print(f"[BİLGİ] {info_msg}")
             messagebox.showinfo("Bilgi", info_msg)
     
+    def delete_current_image(self):
+        """Mevcut görseli siler ve deletedimages klasörüne taşır"""
+        if not self.current_image_path or not self.image_files:
+            messagebox.showwarning("Uyarı", "Silinecek görsel yok!")
+            return
+        
+        # Onay al
+        result = messagebox.askyesno(
+            "Görsel Sil",
+            f"Bu görseli silmek istediğinizden emin misiniz?\n\n{os.path.basename(self.current_image_path)}"
+        )
+        if not result:
+            return
+        
+        try:
+            # Deletedimages klasörünü oluştur
+            deleted_dir = os.path.join(self.selected_folder, "deletedimages")
+            os.makedirs(deleted_dir, exist_ok=True)
+            
+            # Görseli taşı
+            image_filename = os.path.basename(self.current_image_path)
+            dest_path = os.path.join(deleted_dir, image_filename)
+            
+            # Eğer hedef dosya varsa, üzerine yazma - benzersiz isim oluştur
+            counter = 1
+            base_name, ext = os.path.splitext(image_filename)
+            while os.path.exists(dest_path):
+                new_filename = f"{base_name}_{counter}{ext}"
+                dest_path = os.path.join(deleted_dir, new_filename)
+                counter += 1
+            
+            shutil.move(self.current_image_path, dest_path)
+            print(f"[BİLGİ] Görsel silindi: {dest_path}")
+            
+            # İlişkili dosyaları da taşı (eğer output klasörlerinde varsa)
+            image_name = os.path.splitext(image_filename)[0]
+            
+            # Normal mod dosyaları
+            normal_image = os.path.join(self.output_base, "normal", "images", "train", image_filename)
+            normal_label = os.path.join(self.output_base, "normal", "labels", "train", f"{image_name}.txt")
+            if os.path.exists(normal_image):
+                shutil.move(normal_image, os.path.join(deleted_dir, f"normal_{image_filename}"))
+            if os.path.exists(normal_label):
+                shutil.move(normal_label, os.path.join(deleted_dir, f"normal_{image_name}.txt"))
+            
+            # UNet dosyaları
+            unet_image = os.path.join(self.output_base, "unet", "images", "train", image_filename)
+            unet_mask = os.path.join(self.output_base, "unet", "masks", "train", f"{image_name}.png")
+            unet_valid = os.path.join(self.output_base, "unet", "valid", "train", f"{image_name}.png")
+            if os.path.exists(unet_image):
+                shutil.move(unet_image, os.path.join(deleted_dir, f"unet_{image_filename}"))
+            if os.path.exists(unet_mask):
+                shutil.move(unet_mask, os.path.join(deleted_dir, f"unet_{image_name}.png"))
+            if os.path.exists(unet_valid):
+                shutil.move(unet_valid, os.path.join(deleted_dir, f"unet_valid_{image_name}.png"))
+            
+            # Listedeki görseli kaldır
+            self.image_files.remove(self.current_image_path)
+            
+            # Eğer son görselse, bir öncekine geç
+            if self.current_image_index >= len(self.image_files):
+                self.current_image_index = len(self.image_files) - 1
+            
+            # Eğer liste boşaldıysa
+            if len(self.image_files) == 0:
+                messagebox.showinfo("Bilgi", "Tüm görseller silindi!")
+                self.current_image_path = None
+                self.canvas.delete("all")
+                self.update_status()
+                return
+            
+            # Bir sonraki görsele geç
+            if self.current_image_index < len(self.image_files):
+                self.load_current_image()
+            else:
+                self.current_image_index = len(self.image_files) - 1
+                if self.current_image_index >= 0:
+                    self.load_current_image()
+            
+            # Son görsel indeksini güncelle
+            self.save_last_image_index()
+            
+            success_msg = f"Görsel silindi ve deletedimages klasörüne taşındı."
+            print(f"[BAŞARILI] {success_msg}")
+            messagebox.showinfo("Başarılı", success_msg)
+            
+        except Exception as e:
+            error_msg = f"Görsel silinirken hata: {str(e)}"
+            print(f"[HATA] {error_msg}", file=sys.stderr)
+            traceback.print_exc()
+            messagebox.showerror("Hata", error_msg)
+    
+    def go_to_last_image(self):
+        """Config'den kaydedilmiş son görsele gider"""
+        if not self.image_files:
+            messagebox.showwarning("Uyarı", "Yüklü görsel yok!")
+            return
+        
+        saved_index = self.last_image_indices.get(self.mode)
+        if saved_index is None:
+            messagebox.showinfo("Bilgi", f"Bu mod ({self.mode}) için kaydedilmiş son görsel yok.")
+            return
+        
+        if saved_index < 0 or saved_index >= len(self.image_files):
+            messagebox.showwarning("Uyarı", f"Kaydedilmiş indeks ({saved_index + 1}) geçersiz. Toplam görsel sayısı: {len(self.image_files)}")
+            return
+        
+        self.current_image_index = saved_index
+        self.load_current_image()
+        messagebox.showinfo("Bilgi", f"Son görsele gidildi: {saved_index + 1}/{len(self.image_files)}")
+    
     def split_train_valid(self):
         """Tüm modlarda train verilerinin %10'unu validation'a ayırır"""
         try:
@@ -974,19 +1262,6 @@ class YOLOSegmentationEditor:
                 normal_images_train, normal_images_valid,
                 normal_labels_train, normal_labels_valid,
                 "normal"
-            )
-            total_moved += moved
-            
-            # BBMod split
-            bbmod_images_train = os.path.join(self.output_base, "bbmod", "images", "train")
-            bbmod_images_valid = os.path.join(self.output_base, "bbmod", "images", "valid")
-            bbmod_labels_train = os.path.join(self.output_base, "bbmod", "labels", "train")
-            bbmod_labels_valid = os.path.join(self.output_base, "bbmod", "labels", "valid")
-            
-            moved = self._split_mode(
-                bbmod_images_train, bbmod_images_valid,
-                bbmod_labels_train, bbmod_labels_valid,
-                "bbmod"
             )
             total_moved += moved
             
@@ -1016,7 +1291,7 @@ class YOLOSegmentationEditor:
             messagebox.showerror("Hata", error_msg)
     
     def _split_mode(self, images_train_dir, images_valid_dir, labels_train_dir, labels_valid_dir, mode_name):
-        """Bir mod için train/valid split yapar (Normal ve BBMod için)"""
+        """Bir mod için train/valid split yapar (Normal için)"""
         if not os.path.exists(images_train_dir):
             print(f"[UYARI] {mode_name} mod için train klasörü bulunamadı: {images_train_dir}")
             return 0
@@ -1037,7 +1312,7 @@ class YOLOSegmentationEditor:
             return 0
         
         # %10'unu seç (en az 1 dosya)
-        num_valid = max(1, int(len(image_files) * 0.1))
+        num_valid = max(1, int(len(image_files) * 0.2))
         random.shuffle(image_files)
         valid_images = image_files[:num_valid]
         
@@ -1085,7 +1360,7 @@ class YOLOSegmentationEditor:
             return 0
         
         # %10'unu seç (en az 1 dosya)
-        num_valid = max(1, int(len(image_files) * 0.1))
+        num_valid = max(1, int(len(image_files) * 0.2))
         random.shuffle(image_files)
         valid_images = image_files[:num_valid]
         

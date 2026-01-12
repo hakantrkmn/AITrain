@@ -28,14 +28,15 @@ def crop_image_by_bbox(image_path: str, bbox: tuple) -> tuple:
     box_height = y2 - y1
     
     # Padding hesapla ve hemen int'e çevir
-    padding_top = int(round(max(box_width, box_height) * 0.1))  # Üst, sağ, sol için %10
-    padding_bottom = int(round(max(box_width, box_height) * 0.05))  # Alt için %5
+    # Her kenar için kendi boyutunun %10'u kadar padding
+    padding_left_right = int(round(box_width * 0.1))  # Sol ve sağ için genişliğin %10'u
+    padding_top_bottom = int(round(box_height * 0.1))  # Üst ve alt için yüksekliğin %10'u
     
     # Yeni koordinatlar (int olarak hesapla)
-    x1_new = max(0, int(round(x1 - padding_top)))  # Sol
-    y1_new = max(0, int(round(y1 - padding_top)))  # Üst
-    x2_new = min(img_width, int(round(x2 + padding_top)))  # Sağ
-    y2_new = min(img_height, int(round(y2 + padding_bottom)))  # Alt - %5 padding
+    x1_new = max(0, int(round(x1 - padding_left_right)))  # Sol
+    y1_new = max(0, int(round(y1 - padding_top_bottom)))  # Üst
+    x2_new = min(img_width, int(round(x2 + padding_left_right)))  # Sağ
+    y2_new = min(img_height, int(round(y2 + padding_top_bottom)))  # Alt
     
     # Kırp
     crop_box = (x1_new, y1_new, x2_new, y2_new)

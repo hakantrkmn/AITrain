@@ -1,4 +1,11 @@
 {
-  "folder": "/home/acomaster/Belgeler/AITrain/images",
-  "model": "/home/acomaster/Belgeler/AITrain/Plastic.pt"
+  "folder": "/home/acomaster/Belgeler/Plastik1000görseldataset/images",
+  "model": "/home/acomaster/Belgeler/Modeller/1000görsel/1000görselbbox640plastikarkaplanlı/bboxarkaplan.pt",
+  "last_image_index": {
+    "normal": 9,
+    "bbmod": 2426,
+    "unet": 0
+  },
+  "epsilon": 0.0005,
+  "shrink": 3.0
 }

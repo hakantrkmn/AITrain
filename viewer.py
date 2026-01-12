@@ -22,11 +22,7 @@ class LabelViewer:
         self.mode = mode
         
         # Mod'a göre klasör yapısı
-        if mode == "bbmod":
-            self.images_dir = os.path.join(output_base, "bbmod", "images", "train")
-            self.labels_dir = os.path.join(output_base, "bbmod", "labels", "train")
-            self.masks_dir = None
-        elif mode == "unet":
+        if mode == "unet":
             self.images_dir = os.path.join(output_base, "unet", "images", "train")
             self.masks_dir = os.path.join(output_base, "unet", "masks", "train")
             self.labels_dir = None
@@ -130,10 +126,7 @@ class LabelViewer:
             parent_dir = os.path.dirname(os.path.dirname(folder))
             if os.path.basename(folder) == "train":
                 # Mod'a göre labels/masks klasörünü bul
-                if self.mode == "bbmod":
-                    self.labels_dir = os.path.join(parent_dir, "bbmod", "labels", "train")
-                    self.masks_dir = None
-                elif self.mode == "unet":
+                if self.mode == "unet":
                     self.masks_dir = os.path.join(parent_dir, "unet", "masks", "train")
                     self.labels_dir = None
                 else:
@@ -153,11 +146,7 @@ class LabelViewer:
                     if os.path.exists(labels_candidate):
                         self.labels_dir = labels_candidate
                     else:
-                        # Mod'a göre labels klasörünü bul
-                        if self.mode == "bbmod":
-                            self.labels_dir = os.path.join(os.path.dirname(os.path.dirname(folder)), "bbmod", "labels", "train")
-                        else:
-                            self.labels_dir = os.path.join(os.path.dirname(os.path.dirname(folder)), "normal", "labels", "train")
+                        self.labels_dir = os.path.join(os.path.dirname(os.path.dirname(folder)), "normal", "labels", "train")
                     self.masks_dir = None
             
             self.load_images()
@@ -198,7 +187,7 @@ class LabelViewer:
             self.current_mask_path = os.path.join(self.masks_dir, mask_filename)
             self.current_label_path = None
         else:
-            # Normal/BBMod: Label dosyasını bul
+                # Normal: Label dosyasını bul
             self.current_label_path = os.path.join(self.labels_dir, f"{image_name}.txt")
             self.current_mask_path = None
         
@@ -252,7 +241,7 @@ class LabelViewer:
                 else:
                     self.info_label.config(text=f"Mask dosyası bulunamadı: {os.path.basename(self.current_mask_path) if self.current_mask_path else 'N/A'}")
             else:
-                # Normal/BBMod: YOLO label dosyasını oku
+                # Normal: YOLO label dosyasını oku
                 if self.current_label_path and os.path.exists(self.current_label_path):
                     self.load_and_draw_labels(offset_x, offset_y, scale_factor, img_width, img_height)
                 else:

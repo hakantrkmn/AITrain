@@ -18,7 +18,10 @@ from utils.image_utils import (
 
 
 class UNetMode(BaseMode):
-    """UNet: Bounding box kırpma + 320x320 letterbox resize"""
+    """UNet: Bounding box kırpma + 576x320 letterbox resize"""
+    
+    # Hedef boyut
+    TARGET_SIZE = (576, 320)
     
     def load_image(
         self,
@@ -36,8 +39,8 @@ class UNetMode(BaseMode):
         largest_box = max(bounding_boxes, key=lambda b: (b[2] - b[0]) * (b[3] - b[1]))
         cropped_image, crop_box = crop_image_by_bbox(image_path, largest_box)
         
-        # 320x320'e letterbox resize
-        letterbox_img, offset_x, offset_y, scale, new_width, new_height = letterbox_resize(cropped_image, (320, 320))
+        # 576x320'e letterbox resize (aspect ratio korunarak)
+        letterbox_img, offset_x, offset_y, scale, new_width, new_height = letterbox_resize(cropped_image, self.TARGET_SIZE)
         
         # Polygon koordinatlarını önce kırpılmış görsele göre ayarla
         adjusted_masks_crop = adjust_polygons_to_crop(masks_data, crop_box)
@@ -64,7 +67,8 @@ class UNetMode(BaseMode):
             'letterbox_image': letterbox_img,
             'letterbox_offset': (offset_x, offset_y),
             'letterbox_scale': scale,
-            'letterbox_roi_size': (new_width, new_height)
+            'letterbox_roi_size': (new_width, new_height),
+            'target_size': self.TARGET_SIZE
         }
         return temp_path, adjusted_masks, state
     
@@ -74,19 +78,14 @@ class UNetMode(BaseMode):
         edited_data: List[Dict],
         state: Dict
     ) -> bool:
-        """UNet: 320x320 letterbox görseli, binary mask ve valid mask kaydet"""
+        """UNet: 576x320 letterbox görseli, binary mask ve valid mask kaydet"""
         try:
             letterbox_image = state.get('letterbox_image')
             if not letterbox_image:
                 print("[HATA] UNet için letterbox görsel bulunamadı")
                 return False
             
-            letterbox_offset = state.get('letterbox_offset')
-            letterbox_roi_size = state.get('letterbox_roi_size')
-            
-            if not letterbox_offset or not letterbox_roi_size:
-                print("[HATA] UNet için letterbox offset veya ROI size bulunamadı")
-                return False
+            target_size = state.get('target_size', self.TARGET_SIZE)
             
             output_images_dir = os.path.join(self.output_base, "unet", "images", "train")
             output_masks_dir = os.path.join(self.output_base, "unet", "masks", "train")
@@ -100,20 +99,18 @@ class UNetMode(BaseMode):
             image_filename = os.path.basename(image_path)
             image_name = os.path.splitext(image_filename)[0]
             
-            # 320x320 letterbox görseli kaydet
+            # 576x320 letterbox görseli kaydet
             output_image_path = os.path.join(output_images_dir, image_filename)
             letterbox_image.save(output_image_path)
             
             # Binary mask (object mask) oluştur ve kaydet (dosya adı aynı, sadece uzantı .png)
-            binary_mask = create_binary_mask(edited_data, 320, 320)
+            binary_mask = create_binary_mask(edited_data, target_size[0], target_size[1])
             mask_filename = f"{image_name}.png"
             output_mask_path = os.path.join(output_masks_dir, mask_filename)
             binary_mask.save(output_mask_path)
             
-            # Valid mask oluştur ve kaydet (valid klasörüne, dosya adı aynı, sadece uzantı .png)
-            offset_x, offset_y = letterbox_offset
-            roi_width, roi_height = letterbox_roi_size
-            valid_mask = create_valid_mask((320, 320), offset_x, offset_y, roi_width, roi_height)
+            # Valid mask oluştur ve kaydet - tamamen beyaz (576x320)
+            valid_mask = Image.new('L', target_size, 255)  # Tamamen beyaz
             valid_filename = f"{image_name}.png"
             output_valid_path = os.path.join(output_valid_dir, valid_filename)
             valid_mask.save(output_valid_path)

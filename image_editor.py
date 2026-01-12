@@ -8,6 +8,8 @@ from PIL import Image, ImageTk
 import math
 import sys
 import traceback
+from shapely.geometry import Polygon as ShapelyPolygon
+from shapely.validation import make_valid
 
 
 class ImageEditor:
@@ -34,6 +36,9 @@ class ImageEditor:
         self.polygons = []  # Her polygon için: {'points': [(x,y), ...], 'class_id': int}
         self.polygon_items = []  # Canvas item ID'leri
         self.point_items = []  # Nokta item ID'leri
+        self.base_shrink_points = []  # İçe çekme için base noktalar (orijinal canvas koordinatları)
+        self.base_original_points = []  # İçe çekme için base noktalar (orijinal piksel koordinatları)
+        self.current_shrink_factor = 0.0  # Mevcut shrink değeri (zoom sonrası yeniden uygulamak için)
         
         # Seçili nokta
         self.selected_point = None
@@ -87,6 +92,7 @@ class ImageEditor:
             masks_data: YOLOProcessor'dan gelen maske verileri
         """
         self.image_path = image_path
+        self.current_shrink_factor = 0.0  # Yeni görsel yüklendiğinde shrink sıfırla
         
         # Canvas'ı temizle
         self.canvas.delete("all")
@@ -137,18 +143,25 @@ class ImageEditor:
             
             # Polygon'ları çiz
             self.polygons = []
+            self.base_shrink_points = []  # Base noktaları sıfırla (canvas koordinatları)
+            self.base_original_points = []  # Base noktaları sıfırla (piksel koordinatları)
             for mask_data in masks_data:
                 polygon_points = mask_data.get('polygon', [])
                 if polygon_points:
                     # Piksel koordinatlarını canvas koordinatlarına çevir
                     canvas_points = self.pixel_to_canvas(polygon_points)
+                    # Orijinal piksel koordinatlarının kopyasını oluştur
+                    original_points_copy = [(x, y) for x, y in polygon_points]
                     self.polygons.append({
                         'points': canvas_points,
-                        'original_points': polygon_points,  # Orijinal piksel koordinatları
+                        'original_points': original_points_copy,  # Orijinal piksel koordinatları
                         'class_id': mask_data.get('class_id', 0)
                     })
+                    # Base noktaları sakla (içe çekme için)
+                    self.base_shrink_points.append([(x, y) for x, y in canvas_points])
+                    self.base_original_points.append([(x, y) for x, y in polygon_points])
             
-            self.draw_polygons()
+            # draw_polygons burada çağrılmayacak, main.py'de shrink kontrolü yapılacak
             
         except Exception as e:
             error_msg = f"Görsel yüklenirken hata: {str(e)}"
@@ -265,6 +278,7 @@ class ImageEditor:
             self.pan_start_y = y
             self.pan_start_offset_x = self.offset_x
             self.pan_start_offset_y = self.offset_y
+            # Pan modunda nokta seçimi yapma
             return
         
         # Son tıklama konumunu kaydet
@@ -299,12 +313,12 @@ class ImageEditor:
             self.offset_x = self.pan_start_offset_x + dx
             self.offset_y = self.pan_start_offset_y + dy
             
-            # Görseli ve polygon'ları yeniden çiz
+            # Görseli ve polygon'ları yeniden çiz (noktalar takip edecek)
             self.redraw_image()
             return
         
-        # Normal nokta sürükleme
-        if self.selected_polygon_idx is not None and self.selected_point_idx is not None:
+        # Normal nokta sürükleme (pan modunda değilse)
+        if not self.is_panning and self.selected_polygon_idx is not None and self.selected_point_idx is not None:
             # Noktayı güncelle
             polygon = self.polygons[self.selected_polygon_idx]
             polygon['points'][self.selected_point_idx] = (x, y)
@@ -312,6 +326,16 @@ class ImageEditor:
             # Orijinal piksel koordinatlarını da güncelle
             pixel_x, pixel_y = self.canvas_to_pixel(x, y)
             polygon['original_points'][self.selected_point_idx] = (pixel_x, pixel_y)
+            
+            # Base noktaları da güncelle (içe çekme için)
+            if self.selected_polygon_idx < len(self.base_shrink_points):
+                if self.selected_point_idx < len(self.base_shrink_points[self.selected_polygon_idx]):
+                    self.base_shrink_points[self.selected_polygon_idx][self.selected_point_idx] = (x, y)
+            
+            # Base original noktaları da güncelle
+            if self.selected_polygon_idx < len(self.base_original_points):
+                if self.selected_point_idx < len(self.base_original_points[self.selected_polygon_idx]):
+                    self.base_original_points[self.selected_polygon_idx][self.selected_point_idx] = (pixel_x, pixel_y)
             
             # Yeniden çiz
             self.draw_polygons()
@@ -326,6 +350,11 @@ class ImageEditor:
         """Tuş basıldığında"""
         if event.keysym == "space":
             self.is_panning = True
+            # Seçili noktayı temizle
+            self.selected_polygon_idx = None
+            self.selected_point_idx = None
+            # Seçimi kaldırmak için polygon'ları yeniden çiz
+            self.draw_polygons()
             # Cursor'u değiştir (opsiyonel)
             self.canvas.config(cursor="hand2")
     
@@ -421,13 +450,22 @@ class ImageEditor:
         )
         
         # Polygon'ları canvas koordinatlarına çevir ve çiz
+        self.base_shrink_points = []  # Base noktaları yeniden hesapla
+        self.base_original_points = []  # Base original noktaları yeniden hesapla
         for polygon in self.polygons:
             # Orijinal piksel koordinatlarını canvas koordinatlarına çevir
             canvas_points = self.pixel_to_canvas(polygon['original_points'])
             polygon['points'] = canvas_points
+            # Base noktaları sakla (içe çekme için)
+            self.base_shrink_points.append([(x, y) for x, y in canvas_points])
+            self.base_original_points.append([(x, y) for x, y in polygon['original_points']])
         
-        # Polygon'ları çiz
-        self.draw_polygons()
+        # Shrink uygulanmışsa yeniden uygula
+        if self.current_shrink_factor > 0:
+            self.shrink_polygons(self.current_shrink_factor)
+        else:
+            # Polygon'ları çiz
+            self.draw_polygons()
     
     def add_point_at_last_click(self) -> bool:
         """
@@ -475,6 +513,25 @@ class ImageEditor:
             # Noktayı ekle
             polygon['points'].insert(insert_idx, (x, y))
             polygon['original_points'].insert(insert_idx, (pixel_x, pixel_y))
+            
+            # Base noktaları da güncelle (içe çekme için)
+            poly_idx = 0  # İlk polygon'a ekliyoruz
+            if poly_idx < len(self.base_shrink_points):
+                self.base_shrink_points[poly_idx].insert(insert_idx, (x, y))
+            else:
+                # Base noktalar yoksa oluştur
+                self.base_shrink_points = []
+                for p in self.polygons:
+                    self.base_shrink_points.append([pt for pt in p['points']])
+            
+            # Base original noktaları da güncelle
+            if poly_idx < len(self.base_original_points):
+                self.base_original_points[poly_idx].insert(insert_idx, (pixel_x, pixel_y))
+            else:
+                # Base original noktalar yoksa oluştur
+                self.base_original_points = []
+                for p in self.polygons:
+                    self.base_original_points.append([pt for pt in p['original_points']])
         
         # Yeniden çiz
         self.draw_polygons()
@@ -534,6 +591,16 @@ class ImageEditor:
         deleted_point = polygon['points'].pop(self.selected_point_idx)
         deleted_original = polygon['original_points'].pop(self.selected_point_idx)
         
+        # Base noktaları da güncelle (içe çekme için)
+        if self.selected_polygon_idx < len(self.base_shrink_points):
+            if self.selected_point_idx < len(self.base_shrink_points[self.selected_polygon_idx]):
+                self.base_shrink_points[self.selected_polygon_idx].pop(self.selected_point_idx)
+        
+        # Base original noktaları da güncelle
+        if self.selected_polygon_idx < len(self.base_original_points):
+            if self.selected_point_idx < len(self.base_original_points[self.selected_polygon_idx]):
+                self.base_original_points[self.selected_polygon_idx].pop(self.selected_point_idx)
+        
         # Seçimi temizle
         self.selected_polygon_idx = None
         self.selected_point_idx = None
@@ -543,17 +610,203 @@ class ImageEditor:
         print(f"[BİLGİ] Nokta silindi: ({deleted_original[0]:.1f}, {deleted_original[1]:.1f})")
         return True
     
+    def shrink_polygons(self, shrink_factor: float):
+        """
+        Shapely kullanarak polygon'u gerçek anlamda içe doğru küçültür (buffer/offset).
+        Bu yöntem kenarları paralel şekilde içe kaydırır.
+        
+        Args:
+            shrink_factor: 0.0 (değişiklik yok) ile 1.0 (maksimum küçültme) arası değer
+        """
+        # Mevcut shrink değerini sakla (zoom sonrası yeniden uygulamak için)
+        self.current_shrink_factor = shrink_factor
+        
+        if shrink_factor <= 0.0:
+            # Slider sıfıra döndüğünde base noktalara geri dön
+            if len(self.base_shrink_points) == len(self.polygons):
+                for i, polygon in enumerate(self.polygons):
+                    base_points = self.base_shrink_points[i]
+                    base_original = self.base_original_points[i] if i < len(self.base_original_points) else None
+                    if len(base_points) == len(polygon['points']):
+                        # Canvas koordinatlarını base'e geri döndür
+                        polygon['points'] = [(x, y) for x, y in base_points]
+                        # Orijinal piksel koordinatlarını base'e geri döndür
+                        if base_original and len(base_original) == len(polygon['original_points']):
+                            polygon['original_points'] = [(x, y) for x, y in base_original]
+                self.draw_polygons()
+            return
+        
+        shrink_factor = min(1.0, max(0.0, shrink_factor))  # 0-1 arasına sınırla
+        
+        # Base noktalar yoksa, mevcut noktaları base olarak kullan
+        if len(self.base_shrink_points) != len(self.polygons):
+            self.base_shrink_points = []
+            self.base_original_points = []
+            for polygon in self.polygons:
+                self.base_shrink_points.append([(x, y) for x, y in polygon['points']])
+                self.base_original_points.append([(x, y) for x, y in polygon['original_points']])
+        
+        for poly_idx, polygon in enumerate(self.polygons):
+            base_points = self.base_shrink_points[poly_idx] if poly_idx < len(self.base_shrink_points) else polygon['points']
+            points = polygon['points']
+            original_points = polygon['original_points']
+            
+            if len(base_points) < 3:
+                continue
+            
+            try:
+                # Shapely polygon oluştur
+                shapely_poly = ShapelyPolygon(base_points)
+                
+                # Polygon geçerli değilse düzelt
+                if not shapely_poly.is_valid:
+                    shapely_poly = make_valid(shapely_poly)
+                    if shapely_poly.geom_type != 'Polygon':
+                        continue
+                
+                # Polygon'un maksimum içe küçültme mesafesini hesapla
+                # (merkeze olan en kısa mesafe)
+                centroid = shapely_poly.centroid
+                
+                # Polygon'un alanına göre maksimum offset hesapla
+                # Daha küçük bir değer kullanarak aşırı küçülmeyi önle
+                area = shapely_poly.area
+                perimeter = shapely_poly.length
+                
+                # Maksimum offset: yaklaşık olarak polygon'un yarıçapı
+                # area = pi * r^2 -> r = sqrt(area / pi)
+                max_offset = math.sqrt(area / math.pi) * 0.9  # %90'ı kadar küçült
+                
+                # Slider değerine göre offset hesapla
+                offset = shrink_factor * max_offset
+                
+                # Negatif buffer = içe doğru küçültme
+                shrunk_poly = shapely_poly.buffer(-offset, join_style=2)  # join_style=2: mitre
+                
+                # Sonuç boş veya geçersiz olabilir
+                if shrunk_poly.is_empty or not shrunk_poly.is_valid:
+                    continue
+                
+                # MultiPolygon olabilir, en büyüğünü al
+                if shrunk_poly.geom_type == 'MultiPolygon':
+                    shrunk_poly = max(shrunk_poly.geoms, key=lambda p: p.area)
+                elif shrunk_poly.geom_type != 'Polygon':
+                    continue
+                
+                # Yeni noktaları al
+                new_coords = list(shrunk_poly.exterior.coords)[:-1]  # Son nokta tekrar, çıkar
+                
+                if len(new_coords) < 3:
+                    continue
+                
+                # Nokta sayısı değişmiş olabilir, orijinal sayıya yakın tutmaya çalış
+                # Basit interpolasyon ile orijinal nokta sayısına eşitle
+                target_count = len(base_points)
+                new_coords = self._resample_polygon(new_coords, target_count)
+                
+                # Tüm noktaları güncelle
+                if len(new_coords) == len(points):
+                    for i in range(len(new_coords)):
+                        new_x, new_y = new_coords[i]
+                        points[i] = (new_x, new_y)
+                else:
+                    # Nokta sayısı farklıysa, listeyi tamamen değiştir
+                    polygon['points'] = list(new_coords)
+                    
+            except Exception as e:
+                continue
+        
+        # Yeniden çiz
+        self.draw_polygons()
+    
+    def _resample_polygon(self, coords: list, target_count: int) -> list:
+        """
+        Polygon noktalarını hedef sayıya yeniden örnekler.
+        Kenar boyunca eşit aralıklı noktalar oluşturur.
+        """
+        if len(coords) == target_count:
+            return coords
+        
+        if len(coords) < 3:
+            return coords
+        
+        # Toplam çevre uzunluğunu hesapla
+        total_length = 0
+        lengths = []
+        for i in range(len(coords)):
+            x1, y1 = coords[i]
+            x2, y2 = coords[(i + 1) % len(coords)]
+            length = math.sqrt((x2 - x1)**2 + (y2 - y1)**2)
+            lengths.append(length)
+            total_length += length
+        
+        if total_length < 0.001:
+            return coords
+        
+        # Hedef noktalar arası mesafe
+        step = total_length / target_count
+        
+        # Yeni noktaları oluştur
+        new_coords = []
+        current_dist = 0
+        current_idx = 0
+        accumulated = 0
+        
+        for _ in range(target_count):
+            target_dist = current_dist
+            
+            # Hedef mesafeye ulaşana kadar kenarlar üzerinde ilerle
+            while current_idx < len(coords):
+                edge_start = coords[current_idx]
+                edge_end = coords[(current_idx + 1) % len(coords)]
+                edge_length = lengths[current_idx]
+                
+                remaining_in_edge = edge_length - (target_dist - accumulated)
+                
+                if remaining_in_edge >= 0 and (target_dist - accumulated) <= edge_length:
+                    # Bu kenar üzerinde bir nokta
+                    t = (target_dist - accumulated) / edge_length if edge_length > 0 else 0
+                    t = max(0, min(1, t))
+                    new_x = edge_start[0] + t * (edge_end[0] - edge_start[0])
+                    new_y = edge_start[1] + t * (edge_end[1] - edge_start[1])
+                    new_coords.append((new_x, new_y))
+                    break
+                else:
+                    accumulated += edge_length
+                    current_idx += 1
+            
+            current_dist += step
+        
+        # Eğer yeterli nokta oluşturulamadıysa, orijinal koordinatları döndür
+        if len(new_coords) < target_count:
+            # Basit interpolasyon
+            new_coords = []
+            for i in range(target_count):
+                t = i / target_count
+                idx = int(t * len(coords))
+                idx = min(idx, len(coords) - 1)
+                new_coords.append(coords[idx])
+        
+        return new_coords
+    
     def get_edited_points(self) -> list:
         """
         Düzenlenmiş noktaları piksel koordinatlarında döndürür.
+        Mevcut canvas koordinatlarından (shrink uygulanmış olabilir) piksel koordinatlarına çevirir.
         
         Returns:
-            Her polygon için orijinal piksel koordinatlarını içeren liste
+            Her polygon için piksel koordinatlarını içeren liste
         """
         result = []
         for polygon in self.polygons:
+            # Mevcut canvas koordinatlarından piksel koordinatlarına çevir
+            pixel_points = []
+            for x, y in polygon['points']:
+                pixel_x, pixel_y = self.canvas_to_pixel(x, y)
+                pixel_points.append((pixel_x, pixel_y))
+            
             result.append({
-                'polygon': polygon['original_points'],
+                'polygon': pixel_points,
                 'class_id': polygon.get('class_id', 0)
             })
         return result

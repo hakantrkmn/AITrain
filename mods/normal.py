@@ -35,6 +35,10 @@ class NormalMode(BaseMode):
             output_images_dir = os.path.join(self.output_base, "normal", "images", "train")
             output_labels_dir = os.path.join(self.output_base, "normal", "labels", "train")
             
+            # Klasörleri oluştur
+            os.makedirs(output_images_dir, exist_ok=True)
+            os.makedirs(output_labels_dir, exist_ok=True)
+            
             image_filename = os.path.basename(image_path)
             image_name = os.path.splitext(image_filename)[0]
             
